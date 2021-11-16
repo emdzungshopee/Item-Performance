@@ -1,0 +1,327 @@
+WITH
+fx AS
+(
+SELECT *
+FROM order_mart_dim_exchange_rate
+WHERE grass_region = 'VN'
+AND grass_date >= DATE '2020-01-01'
+)
+
+, fs_list AS
+(
+SELECT
+    DISTINCT
+    TRY_CAST(grass_date AS DATE) grass_date,
+    batch,
+    TRY_CAST(itemid AS BIGINT) item_id,
+    TRY_CAST(modelid AS BIGINT) model_id,
+    TRY_CAST(start_time AS TIMESTAMP) start_time,
+    TRY_CAST(end_time AS TIMESTAMP) end_time,
+    TRY_CAST(promo_price AS BIGINT) promo_price,
+    price_point,
+    TRY_CAST(stock AS BIGINT) stock
+FROM shopee_vn_bi_team__lpp_new_deal_list_v1
+WHERE
+format_type IS NULL
+AND ingestion_timestamp != 'a'
+)
+
+, col_list_before AS
+(
+SELECT
+    DISTINCT
+    TRY_CAST(o.grass_date AS DATE) grass_date,
+    TRY_CAST(itemid AS BIGINT) item_id,
+    TRY_CAST(modelid AS BIGINT) model_id,
+    TRY_CAST(stock AS BIGINT) stock
+FROM shopee_vn_bi_team__lpp_collection_list_v1 o
+WHERE
+TRY_CAST(o.grass_date AS DATE) = DATE '2021-03-03'
+AND ingestion_timestamp != 'a'
+)
+
+, col_list_after AS
+(
+SELECT
+    DISTINCT
+    TRY_CAST(o.grass_date AS DATE) grass_date,
+    TRY_CAST(itemid AS BIGINT) item_id,
+    TRY_CAST(stock AS BIGINT) stock
+FROM shopee_vn_bi_team__lpp_collection_list_v1 o
+WHERE
+TRY_CAST(o.grass_date AS DATE) >= DATE '2021-03-08'
+AND ingestion_timestamp NOT IN (SELECT exclude_timestamp FROM shopee_vn_bi_team__lpp_exclude_issue)
+)
+
+, col_nb AS
+(
+SELECT
+    DISTINCT
+    TRY_CAST(o.grass_date AS DATE) grass_date,
+    TRY_CAST(itemid AS BIGINT) item_id,
+    TRY_CAST(stock AS BIGINT) stock
+FROM shopee_vn_bi_team__collection_deals_nb o
+WHERE
+ingestion_timestamp != 'a'
+)
+
+, lpp_fs_orders_before AS
+(
+SELECT
+    DISTINCT
+    order_id,
+    f.item_id,
+    f.model_id,
+    group_id,
+    bundle_order_item_id,
+    price_point
+FROM order_mart_dwd_order_item_all_event_final_status_df o
+JOIN fs_list f
+ON DATE(SPLIT(o.create_datetime, ' ')[1]) = DATE(f.grass_date) AND o.item_id = f.item_id AND o.model_id = f.model_id AND FROM_UNIXTIME(create_timestamp - 3600) BETWEEN start_time AND end_time
+WHERE
+    f.item_id IS NOT NULL
+AND item_promotion_source = 'flash_sale'
+AND DATE(SPLIT(o.create_datetime, ' ')[1]) BETWEEN DATE '2021-02-28' AND DATE '2021-03-07'
+AND item_rebate_by_shopee_amt > 0
+)
+
+, lpp_fs_orders_after AS
+(
+SELECT
+    DISTINCT
+    order_id,
+    f.item_id,
+    f.model_id,
+    group_id,
+    bundle_order_item_id,
+    price_point
+FROM order_mart_dwd_order_item_all_event_final_status_df o
+JOIN fs_list f
+ON DATE(SPLIT(o.create_datetime, ' ')[1]) = DATE(f.grass_date) AND o.item_id = f.item_id AND o.model_id = f.model_id AND FROM_UNIXTIME(create_timestamp - 3600) BETWEEN start_time AND end_time
+WHERE
+    f.item_id IS NOT NULL
+AND item_promotion_source = 'flash_sale'
+AND DATE(SPLIT(o.create_datetime, ' ')[1]) >= DATE '2021-03-08'
+)
+
+, lpp_col_orders_before AS
+(
+SELECT
+    DISTINCT
+    order_id,
+    c.item_id,
+    c.model_id,
+    group_id,
+    bundle_order_item_id,
+    'Collection' AS price_point
+FROM order_mart_dwd_order_item_all_event_final_status_df o
+JOIN col_list_before c
+ON o.item_id = c.item_id AND o.model_id = c.model_id AND DATE(SPLIT(o.create_datetime, ' ')[1]) = c.grass_date
+WHERE
+    DATE(SPLIT(o.create_datetime, ' ')[1]) = DATE '2021-03-03'
+AND (item_promotion_source != 'flash_sale' OR item_promotion_source IS NULL)
+AND item_rebate_by_shopee_amt > 0
+)
+
+, lpp_col_orders_after AS
+(
+SELECT
+    DISTINCT
+    order_id,
+    c.item_id,
+    model_id,
+    group_id,
+    bundle_order_item_id,
+    'Collection' AS price_point
+FROM order_mart_dwd_order_item_all_event_final_status_df o
+JOIN col_list_after c
+ON o.item_id = c.item_id AND DATE(SPLIT(o.create_datetime, ' ')[1]) = c.grass_date
+WHERE
+    DATE(SPLIT(o.create_datetime, ' ')[1]) >= DATE '2021-03-08'
+AND (item_promotion_source != 'flash_sale' OR item_promotion_source IS NULL)
+)
+
+, lpp_col_orders_nb AS
+(
+SELECT
+    DISTINCT
+    order_id,
+    c.item_id,
+    model_id,
+    group_id,
+    bundle_order_item_id,
+    'NB' AS price_point
+FROM order_mart_dwd_order_item_all_event_final_status_df o
+JOIN col_nb c
+ON o.item_id = c.item_id AND DATE(SPLIT(o.create_datetime, ' ')[1]) = c.grass_date
+WHERE
+    DATE(SPLIT(o.create_datetime, ' ')[1]) >= DATE '2021-05-18'
+AND (item_promotion_source != 'flash_sale' OR item_promotion_source IS NULL)
+)
+
+, lpp_fs_orders AS
+(
+SELECT * FROM lpp_fs_orders_before
+UNION SELECT * FROM lpp_fs_orders_after
+UNION SELECT * FROM lpp_col_orders_before
+UNION SELECT * FROM lpp_col_orders_after
+UNION SELECT * FROM lpp_col_orders_nb
+)
+
+, flash_sale AS (
+   SELECT *
+   FROM
+     shopee_vn.shopee_vn_bi_team__airpay_sponsor_flashsale_data
+   WHERE (ingestion_timestamp = (SELECT "max"(ingestion_timestamp) col_1
+FROM
+  shopee_vn.shopee_vn_bi_team__airpay_sponsor_flashsale_data
+))
+UNION (
+      SELECT *
+      FROM
+        shopee_vn.shopee_vn_bi_team__airpay_sponsor_flashsale_new_batch
+      WHERE ((ingestion_timestamp = (SELECT "max"(ingestion_timestamp) col_2
+FROM
+  shopee_vn.shopee_vn_bi_team__airpay_sponsor_flashsale_new_batch
+)) AND (product_id IS NOT NULL))
+   ) UNION (
+      SELECT *
+      FROM
+        shopee_vn.shopee_vn_bi_team__airpay_sponsor_flashsale_new_scheme
+      WHERE ((ingestion_timestamp = (SELECT "max"(ingestion_timestamp) col_3
+FROM
+  shopee_vn.shopee_vn_bi_team__airpay_sponsor_flashsale_new_scheme
+)) AND (product_id IS NOT NULL))
+   ) )
+, evoucher_deal AS (
+   SELECT DISTINCT *
+   FROM
+     shopee_vn.shopee_vn_bi_team__monthly_voucher_deal_airpay f
+   WHERE (ingestion_timestamp = (SELECT "max"(ingestion_timestamp) col_4
+FROM
+  shopee_vn.shopee_vn_bi_team__monthly_voucher_deal_airpay
+))
+)
+, collection_data AS (
+   SELECT *
+   FROM
+     shopee_vn.shopee_vn_bi_team__airpay_collection_sponsor_data
+   WHERE ((ingestion_timestamp = (SELECT "max"(ingestion_timestamp) col_5
+FROM
+  shopee_vn.shopee_vn_bi_team__airpay_collection_sponsor_data
+)) AND (status = 'Confirmed'))
+)
+, fs_airpay_raw AS (
+(
+      SELECT
+        order_id
+      , o.item_id
+      , model_id
+      , group_id
+      , bundle_order_item_id
+      , 'FS' as price_point
+      FROM
+        (((
+         SELECT DISTINCT *
+         FROM
+           flash_sale
+      )  f
+      INNER JOIN shopee_vn.order_mart_dwd_order_item_all_event_final_status_df o ON (((TRY_CAST(f.product_id AS bigint) = o.item_id) AND (TRY_CAST(f.date AS date) = "date"("split"(o.create_datetime, ' ')[1]))) AND (o.item_promotion_source = 'flash_sale')))
+      LEFT JOIN fx f ON (f.grass_date = "date"("split"(o.create_datetime, ' ')[1])))
+      WHERE "date"("split"(o.create_datetime, ' ')[1]) BETWEEN date'2020-01-01' and current_date - interval '1' day AND (o.payment_method_id IN (28, 30, 5))   ) UNION (
+      SELECT
+        order_id
+      , o.item_id
+      , model_id
+      , group_id
+      , bundle_order_item_id
+      , 'Evoucher' as price_point
+      FROM
+        (((
+         SELECT DISTINCT *
+         FROM
+           evoucher_deal
+      )  f
+      INNER JOIN shopee_vn.order_mart_dwd_order_item_all_event_final_status_df o ON (TRY_CAST(f.itemid AS bigint) = o.item_id))
+      LEFT JOIN fx f ON (f.grass_date = "date"("split"(o.create_datetime, ' ')[1])))
+   ) UNION (
+      SELECT
+        order_id
+      , o.item_id
+      , model_id
+      , group_id
+      , bundle_order_item_id
+      , 'Col' as price_point
+      FROM
+        (((
+         SELECT DISTINCT *
+         FROM
+           collection_data
+      )  c
+      INNER JOIN shopee_vn.order_mart_dwd_order_item_all_event_final_status_df o ON (((TRY_CAST(c.itemid AS bigint) = o.item_id) AND (TRY_CAST(c.grass_date AS date) = "date"("split"(o.create_datetime, ' ')[1]))) AND (item_promotion_source <> 'flash_sale')))
+      LEFT JOIN fx f ON (f.grass_date = "date"("split"(o.create_datetime, ' ')[1])))
+      WHERE "date"("split"(o.create_datetime, ' ')[1]) BETWEEN date'2020-01-01' and current_date - interval '1' day AND (o.payment_method_id IN (28, 30, 5))
+   ) )
+, base AS (
+SELECT
+    o.*
+    , ARRAY_DISTINCT(TRANSFORM(kpi_categories, x -> SLICE(x, 1, 1))) level1_kpi_categories
+    , ARRAY_DISTINCT(TRANSFORM(kpi_categories, x -> SLICE(x, 1, 2))) level2_kpi_categories
+    , ARRAY_DISTINCT(TRANSFORM(kpi_categories, x -> SLICE(x, 1, 3))) level3_kpi_categories
+    , 1/ CAST(CARDINALITY(ARRAY_DISTINCT(TRANSFORM(kpi_categories, x -> SLICE(x, 1, 1)))) AS DOUBLE) l1_factor
+FROM
+    shopee_vn.order_mart_dwd_order_item_all_event_final_status_df o
+WHERE
+    DATE(SPLIT(create_datetime,' ')[1]) = from_iso8601_date('2021-07-07')
+    AND is_bi_excluded = 0
+)
+
+, order_mart AS (
+ SELECT
+    b.*
+
+    , SPLIT_PART(kpi_cat.kpi_category[1],':', 1) l1_kpi_category_id
+    , SPLIT_PART(kpi_cat.kpi_category[1],':', 2) l1_kpi_category
+
+    , SPLIT_PART(kpi_cat.kpi_category[2],':', 1) l2_kpi_category_id
+    , SPLIT_PART(kpi_cat.kpi_category[2],':', 2) l2_kpi_category
+
+    , SPLIT_PART(TRY(kpi_cat.kpi_category[3]),':', 1) l3_kpi_category_id
+    , SPLIT_PART(try(kpi_cat.kpi_category[3]),':', 2) l3_kpi_category
+
+    , (1 / CAST(COALESCE(CARDINALITY(ARRAY_DISTINCT(FILTER(level2_kpi_categories, x -> CONTAINS(x, kpi_cat.kpi_category[1]) ))), 1) AS DOUBLE)) * l1_factor as l2_factor
+    , (1 / CAST(COALESCE(CARDINALITY(ARRAY_DISTINCT(FILTER(level3_kpi_categories, x -> CONTAINS(x, kpi_cat.kpi_category[2]) ))), 1) AS DOUBLE)) * (1 / CAST(COALESCE(CARDINALITY(ARRAY_DISTINCT(FILTER(level2_kpi_categories, x -> CONTAINS(x, kpi_cat.kpi_category[1]) ))), 1) AS DOUBLE)) * l1_factor as l3_factor
+FROM
+    base b
+CROSS JOIN
+    unnest (b.kpi_categories) as kpi_cat(kpi_category)
+)
+
+ , traffic AS
+(
+SELECT grass_hour,
+    item_id,
+    pv_cnt_1h
+FROM shop_traffic_mart_dws_item_civ_1h
+WHERE grass_date = from_iso8601_date('2021-07-07')
+)
+
+SELECT DATE(SPLIT(create_datetime,' ')[1]) grass_date,
+    hour(from_unixtime(create_timestamp-3600)) hour,
+    is_cb_shop,
+    CASE WHEN a.order_id IS NOT NULL THEN 1 ELSE 0 END AS is_lpp,
+    is_flash_sale,
+    flash_sale_type,
+    SUM(order_fraction * l3_factor) orders,
+    SUM(gmv_usd * l3_factor) gmv,
+    SUM(CASE WHEN ap.order_id IS NULL AND is_net_order = 1 THEN item_rebate_by_shopee_amt_usd * l3_factor END) AS rebate,
+    SUM(CASE WHEN pv_voucher_code IS NOT NULL AND is_net_order = 1 THEN (pv_rebate_by_shopee_amt_usd + sv_rebate_by_shopee_amt_usd + pv_coin_earn_by_shopee_amt_usd + sv_coin_earn_by_seller_amt_usd) * l3_factor END) AS voucher,
+    SUM(pv_cnt_1h) view
+FROM order_mart o
+LEFT JOIN
+    lpp_fs_orders a ON o.order_id = a.order_id AND o.item_id = a.item_id AND o.model_id = a.model_id AND o.group_id = a.group_id AND o.bundle_order_item_id = a.bundle_order_item_id
+LEFT JOIN fs_airpay_raw ap
+ON o.order_id = ap.order_id AND o.item_id = ap.item_id AND o.model_id = ap.model_id AND o.group_id = ap.group_id AND o.bundle_order_item_id = ap.bundle_order_item_id
+LEFT JOIN traffic t ON o.item_id = t.item_id AND t.grass_hour = hour(from_unixtime(o.create_timestamp-3600))
+WHERE l1_kpi_category IN ('Fashion Accessories','Women Clothes','Men Bags','Women Bags','Women Shoes','Men Shoes','Men Clothes','Kid Fashion','Watches','Sport & Outdoor')
+GROUP BY 1,2,3,4,5,6
